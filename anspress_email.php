@@ -14,7 +14,7 @@
  * Plugin Name:       AnsPress Email
  * Plugin URI:        http://anspress.io
  * Description:       Email notification extension for AnsPress
- * Version:           1.0.2
+ * Version:           1.2
  * Author:            Rahul Aryan
  * Author URI:        http://anspress.io
  * Text Domain:       anspress_email
@@ -143,11 +143,11 @@ class AnsPress_Ext_AnsPress_Email
         $defaults['new_comment_email_subject'] = __("New comment by {commenter}", 'AnsPress_Email');
         $defaults['new_comment_email_body']    = __("Hello!\r\nA new comment posted on '{question_title}' by {commenter}.\r\n\r\nLink: {comment_link}", 'AnsPress_Email');
 
-        $defaults['edit_question_email_subject'] = __("A question is edited by {asker}", 'AnsPress_Email');
-        $defaults['edit_question_email_body']    = __("Hello!\r\nQuestion '{question_title}' is edited by {asker}.\r\n\r\nLink: {question_link}", 'AnsPress_Email');
+        $defaults['edit_question_email_subject'] = __("A question is edited by {editor}", 'AnsPress_Email');
+        $defaults['edit_question_email_body']    = __("Hello!\r\nQuestion '{question_title}' is edited by {editor}.\r\n\r\nLink: {question_link}", 'AnsPress_Email');
 
-        $defaults['edit_answer_email_subject'] = __("An answer is edited by {answerer}", 'AnsPress_Email');
-        $defaults['edit_answer_email_body']    = __("Hello!\r\nAnswer on '{question_title}' is edited by {answerer}.\r\n\r\nLink: {question_link}", 'AnsPress_Email');
+        $defaults['edit_answer_email_subject'] = __("An answer is edited by {editor}", 'AnsPress_Email');
+        $defaults['edit_answer_email_body']    = __("Hello!\r\nAnswer on '{question_title}' is edited by {editor}.\r\n\r\nLink: {question_link}", 'AnsPress_Email');
 
         $defaults['trash_question_email_subject'] = __("A question is trashed by {user}", 'AnsPress_Email');
         $defaults['trash_question_email_body']    = __("Hello!\r\nQuestion '{question_title}' is trashed by {user}.\r\n", 'AnsPress_Email');
@@ -322,6 +322,44 @@ class AnsPress_Ext_AnsPress_Email
                 'type' => 'textarea',
                 'value' => @$settings['new_comment_email_body'],
                 'attr' => 'style="width:100%;min-height:200px"',
+            ),
+            array(
+                'name' => '__sep',
+                'type' => 'custom',
+                'html' => '<span class="ap-form-separator">' . __('Edit question', 'AnsPress_Email') . '</span>',
+            ),
+            array(
+                'name' => 'anspress_opt[edit_question_email_subject]',
+                'label' => __('Subject', 'AnsPress_Email') ,
+                'type' => 'text',
+                'value' => @$settings['edit_question_email_subject'],
+                'attr' => 'style="width:80%"',
+            ),
+            array(
+                'name' => 'anspress_opt[edit_question_email_body]',
+                'label' => __('Body', 'AnsPress_Email') ,
+                'type' => 'textarea',
+                'value' => @$settings['edit_question_email_body'],
+                'attr' => 'style="width:100%;min-height:200px"',
+            ),
+            array(
+                'name' => '__sep',
+                'type' => 'custom',
+                'html' => '<span class="ap-form-separator">' . __('Edit answer', 'AnsPress_Email') . '</span>',
+            ),
+            array(
+                'name' => 'anspress_opt[edit_answer_email_subject]',
+                'label' => __('Subject', 'AnsPress_Email') ,
+                'type' => 'text',
+                'value' => @$settings['edit_answer_email_subject'],
+                'attr' => 'style="width:80%"',
+            ),
+            array(
+                'name' => 'anspress_opt[edit_answer_email_body]',
+                'label' => __('Body', 'AnsPress_Email') ,
+                'type' => 'textarea',
+                'value' => @$settings['edit_answer_email_body'],
+                'attr' => 'style="width:100%;min-height:200px"',
             )
         ));
     }
@@ -481,7 +519,7 @@ class AnsPress_Ext_AnsPress_Email
 
         $post = get_post($comment->comment_post_ID);
 
-        $question_id = $post->post_type == 'question' ? $post->post_id : $post->post_parent;
+        $post_id = $post->ID;
 
         $args = array(
             '{commenter}'         => ap_user_display_name($comment->user_id),
@@ -492,35 +530,51 @@ class AnsPress_Ext_AnsPress_Email
 
         $args = apply_filters( 'ap_new_comment_email_tags', $args );
 
-        $subject = $this->replace_tags(ap_opt('new_comment_email_subject'), $args);
+        $this->subject = $this->replace_tags(ap_opt('new_comment_email_subject'), $args);
 
-        $message = $this->replace_tags(ap_opt('new_comment_email_body'), $args);
+        $this->message = $this->replace_tags(ap_opt('new_comment_email_body'), $args);
 
-        $subscribers = ap_get_question_subscribers_data($question_id);
+        $this->emails = array();
 
-        if($subscribers)
+        $subscribers = ap_get_comments_subscribers_data($post_id);
+
+        $post_author  = get_user_by( 'id', $post->post_author );
+
+        if(!ap_in_array_r($post_author->data->user_email, $subscribers)){
+            $subscribers[] = (object) array('user_email' => $post_author->data->user_email, 'ID' => $post_author->ID, 'display_name' => $post_author->data->display_name );
+        }
+
+        if($subscribers){            
             foreach ($subscribers as $s)
                 if($s->user_email != $current_user->user_email)
-                    $this->send_mail($s->user_email, $subject, $message);
-            
-        /*if(ap_opt('notify_admin_new_comment') && ap_opt( 'notify_admin_email' ) != $current_user->user_email)
-            $this->send_mail(ap_opt( 'notify_admin_email' ), $subject, $message);*/
+                    $this->emails[] = $s->user_email;
+        }
+
+        $this->initiate_send_email(); 
     }
 
     public function ap_after_update_question($question_id){
-        if (!ap_opt('notify_admin_edit_question'))
-            return;
             
         $current_user = wp_get_current_user();
 
         $question = get_post($question_id);
 
-        // don't bother if current user is admin
-        if(ap_opt( 'notify_admin_email' ) == $current_user->user_email)
+        $this->emails = array();        
+        
+        if(ap_opt( 'notify_admin_email' ) != $current_user->user_email && ap_opt('notify_admin_edit_question'))
+            $this->emails[] = ap_opt( 'notify_admin_email' );
+
+        $post_author  = get_user_by( 'id', $question->post_author );
+
+        if($post_author && $post_author->data->user_email != $current_user->user_email)
+            $this->emails[] = $post_author->data->user_email;
+
+        if(!is_array($this->emails) || empty($this->emails))
             return;
 
         $args = array(
             '{asker}'             => ap_user_display_name($question->post_author),
+            '{editor}'            => ap_user_display_name(get_current_user_id()),
             '{question_title}'    => $question->post_title,
             '{question_link}'     => get_permalink($question->ID),
             '{question_content}'  => $question->post_content,
@@ -529,13 +583,11 @@ class AnsPress_Ext_AnsPress_Email
 
         $args = apply_filters( 'ap_edit_question_email_tags', $args );
 
-        $subject = $this->replace_tags(ap_opt('edit_question_email_subject'), $args);
+        $this->subject = $this->replace_tags(ap_opt('edit_question_email_subject'), $args);
 
-        $message = $this->replace_tags(ap_opt('edit_question_email_body'), $args);
+        $this->message = $this->replace_tags(ap_opt('edit_question_email_body'), $args);
 
-        //sends email
-        $this->send_mail(ap_opt( 'notify_admin_email' ), $subject, $message);
-        
+        $this->initiate_send_email();        
     }
 
     public function ap_after_update_answer($answer_id)
@@ -547,12 +599,22 @@ class AnsPress_Ext_AnsPress_Email
 
         $answer = get_post($answer_id);
 
-        // don't bother if current user is admin
-        if(ap_opt( 'notify_admin_email' ) == $current_user->user_email)
+        $this->emails = array();        
+        
+        if(ap_opt( 'notify_admin_email' ) != $current_user->user_email && ap_opt('notify_admin_edit_answer'))
+            $this->emails[] = ap_opt( 'notify_admin_email' );
+
+        $post_author  = get_user_by( 'id', $answer->post_author );
+
+        if($post_author && $post_author->data->user_email != $current_user->user_email)
+            $this->emails[] = $post_author->data->user_email;
+
+        if(!is_array($this->emails) || empty($this->emails))
             return;
 
         $args = array(
             '{answerer}'          => ap_user_display_name($answer->post_author),
+            '{editor}'            => ap_user_display_name(get_current_user_id()),
             '{question_title}'    => $answer->post_title,
             '{question_link}'     => get_permalink($answer->post_parent),
             '{answer_content}'    => $answer->post_content
@@ -560,12 +622,11 @@ class AnsPress_Ext_AnsPress_Email
 
         $args = apply_filters( 'ap_edit_answer_email_tags', $args );
 
-        $subject = $this->replace_tags(ap_opt('edit_answer_email_subject'), $args);
+        $this->subject = $this->replace_tags(ap_opt('edit_answer_email_subject'), $args);
 
-        $message = $this->replace_tags(ap_opt('edit_answer_email_body'), $args);
+        $this->message = $this->replace_tags(ap_opt('edit_answer_email_body'), $args);
 
-        //sends email
-        $this->send_mail(ap_opt( 'notify_admin_email' ), $subject, $message);
+        $this->initiate_send_email();   
     }
 
     public function ap_trash_question($post)
@@ -637,6 +698,16 @@ function anspress_ext_AnsPress_Email() {
 }
 add_action( 'plugins_loaded', 'anspress_ext_AnsPress_Email' );
 
+function anspress_activate_anspress_email(){
+    $settings = get_option( 'anspress_opt');
+    unset($settings['edit_question_email_subject']);
+    unset($settings['edit_question_email_body']);
+    unset($settings['edit_answer_email_subject']);
+    unset($settings['edit_answer_email_body']);
+    update_option( 'anspress_opt', $settings);
+}
+register_activation_hook(__FILE__, 'anspress_activate_anspress_email');
+
 /**
  * Get the email ids of all subscribers of question
  * @param  integer $post_id
@@ -686,3 +757,30 @@ function ap_get_question_subscribers_data($post_id, $question_subsciber = true){
     return $q;
 }
 
+function ap_get_comments_subscribers_data($post_id){
+    global $wpdb;
+
+    $query = $wpdb->prepare("SELECT u.user_email, u.ID, u.display_name, UNIX_TIMESTAMP(m.apmeta_date) as unix_date FROM ".$wpdb->prefix."ap_meta m INNER JOIN ".$wpdb->prefix."users as u ON u.ID = m.apmeta_userid where m.apmeta_type = 'subscriber' AND m.apmeta_value = %d AND m.apmeta_param = 'comment' GROUP BY m.apmeta_userid", $post_id);
+
+    $key = md5($query);
+
+    $q = wp_cache_get( $key, 'ap' );
+
+    if($q === false){
+        $q = $wpdb->get_results($query);
+        wp_cache_set( $key, $q, 'ap' );
+    }
+
+    return $q;
+}
+
+if(!function_exists('ap_in_array_r')){
+    function ap_in_array_r($needle, $haystack, $strict = false) {
+        foreach ($haystack as $item) {
+            if (($strict ? $item === $needle : $item == $needle) || (is_array($item) && in_array_r($needle, $item, $strict))) {
+                return true;
+            }
+        }
+        return false;
+    }
+}
